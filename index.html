@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>POW NFT Miner</title>
+</head>
+
+
+
+
+<script type="module">
+    //Some helper functions. Does 99% of what a frontend JS framework does. Don't be lazy. JQuery sucks.
+    function ById(id){
+        //Select an element by Id
+        return document.getElementById(id);
+    }
+    function SetText(id,text){
+        //Set text of an element (By ID)
+        document.getElementById(id).innerText = text;
+    }
+    function Show(id,onOff){
+        //Show/hide an element
+        document.getElementById(id).style.visibility = onOff?"":"hidden";
+    }
+    function OnClick(id,func){
+        //Assign click behaviour on an element
+        document.getElementById(id).addEventListener("click", func);
+    }
+
+
+
+
+    import { ethers } from "./ethers-5.0.esm.min.js";
+    let signer, provider, connected_address,
+        contract, contractWithSigner;
+
+
+    //For realsies
+    const contractAddress_mainnet = "0x9Abb7BdDc43FA67c76a62d8C016513827f59bE1b";
+    //For testing:
+    const contractAddress_ropsten = "0x88066567a7F90409Ced36D4030C47909Eb910926";
+
+    //Change this depending if you're testing or realing:
+    const contractAddress = contractAddress_mainnet;
+    // const contractAddress = contractAddress_ropsten;
+
+    //Make sure you change the network in metamask too or you'll get errors.
+    //  The site manages all this and tells you if it's wrong but this is
+    //    just the bare bones miner.
+
+
+
+    const contractAbi = ["event Approval(address indexed _owner,address indexed _approved,uint256 indexed _tokenId)","event ApprovalForAll(address indexed _owner,address indexed _operator,bool _approved)","event Migrate(uint256 indexed _tokenId)","event Mined(uint256 indexed _tokenId,bytes32 hash)","event Transfer(address indexed _from,address indexed _to,uint256 indexed _tokenId)","event Withdraw(uint256 indexed _tokenId,uint256 value)","function PREV_CHAIN_LAST_HASH() view returns(bytes32 )","function UNMIGRATED() view returns(uint256 )","function V2_TOTAL() view returns(uint256 )","function approve(address _approved,uint256 _tokenId) nonpayable","function balanceOf(address _owner) view returns(uint256 )","function getApproved(uint256 _tokenId) view returns(address )","function hashOf(uint256 _tokenId) view returns(bytes32 )","function isApprovedForAll(address _owner,address _operator) view returns(bool )","function migrate(uint256 _tokenId,uint256 _withdrawEthUntil) nonpayable","function migrateMultiple(uint256[] _tokenIds,uint256[] _withdrawUntil) nonpayable","function mine(uint256 nonce) payable","function name() view returns(string _name)","function ownerOf(uint256 _tokenId) view returns(address )","function safeTransferFrom(address _from,address _to,uint256 _tokenId) nonpayable","function safeTransferFrom(address _from,address _to,uint256 _tokenId,bytes data) nonpayable","function setApprovalForAll(address _operator,bool _approved) nonpayable","function supportsInterface(bytes4 interfaceID) view returns(bool )","function symbol() view returns(string _symbol)","function tokenByIndex(uint256 _index) view returns(uint256 )","function tokenOfOwnerByIndex(address _owner,uint256 _index) view returns(uint256 )","function tokenURI(uint256 _tokenId) view returns(string )","function totalSupply() view returns(uint256 )","function transferFrom(address _from,address _to,uint256 _tokenId) nonpayable","function withdraw(uint256 _tokenId,uint256 _withdrawUntil) nonpayable","function withdrawMultiple(uint256[] _tokenIds,uint256[] _withdrawUntil) nonpayable"];
+    let unlocked = false;
+    let next_id = 0;
+    let prev_hash = 0;
+
+    let BN = ethers.BigNumber;
+    const BASE_DIFFICULTY = BN.from('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff').div(BN.from(300));
+    const DIFFICULTY_RAMP = 3;
+    const BASE_COST = BN.from(ethers.utils.parseEther('0.000045'));
+
+
+    let nonce = 0;
+    let difficulty; //BN Use BN for things that matter because otherwise javascript will fuck you in the end.
+    let found = false, mining = false;
+
+
+    let background_mining = true;
+    //If true, it will run on a setTimeout loop
+    //If false, it will loop on requestAnimationFrame
+    //  Apparently the latter is sometimes faster,
+    //    but you need to have the tab open
+
+
+    async function unlock(){
+        //Unlock metamask and then init  all the things
+        console.log("unlock");
+        try{
+            Show("button-mine",false);
+            Show("button-stop",false);
+            Show("button-mint",false);
+            SetText("readout","loading");
+
+
+            await window.ethereum.send('eth_requestAccounts');
+
+            provider = await new ethers.providers.Web3Provider(window.ethereum,"any");
+            signer = provider.getSigner();
+            connected_address = await signer.getAddress();
+
+            contract = new ethers.Contract(contractAddress, contractAbi, provider);
+            contractWithSigner = contract.connect(signer);
+
+            await init_events();
+
+
+
+            Show("button-mine",true);
+            SetText("readout","");
+
+            unlocked = true;
+        }catch(e){
+            console.log(e);
+        }
+
+    }
+    unlock();
+
+    async function init_events(){
+        //Read the initial state from the Mined event, and tell it what to do
+        //  when it sees a new one. The current id/hash comes from events.
+
+        console.log("init events")
+        function parse_event(event){
+            if(typeof event === "undefined" || event.event !== "Mined") {
+                //Because shit gets weird sometimes
+                return;
+            }
+            let id = Number(event.args._tokenId._hex) + 1;
+            if(id >= next_id){
+                next_id = id + 1;
+                prev_hash = event.args.hash;
+                difficulty = getDifficulty(next_id);
+                nonce = 0;
+            }
+
+            //Note: you'll wanna add some code here for what to do if the
+            //  miner had found an atom, but the tx window was open or the
+            //    tx had already been submitted.
+
+
+        }
+
+        //Lazy, check last 4500 blocks to find the last mined event.
+        //  The site looks at all blocks because it uses it to process
+        //    other stuff, but this is 24 hours so should catch the
+        //      latest Mined event even if things are quiet.
+        //        This is just looking for the latest Atom at startup.
+        //          This step can definitely be improved.
+        let current_block = await provider.getBlockNumber();
+        let filter = contractWithSigner.filters.Mined();
+        let all;
+        if(contractAddress_mainnet === contractAddress){
+            all = await contractWithSigner.queryFilter(
+                [filter],
+                current_block - 4500
+            );
+        }else{
+            //Search all of testnet because there arent many events.
+            all = await contractWithSigner.queryFilter(
+                [filter]
+            );
+        }
+        all.forEach(evt => {
+            parse_event(evt);
+        });
+
+
+
+        //This is when a new Mined event is triggered (ie, someone mines while you're on the page).
+        contractWithSigner.on( "Mined" , (author,oldValue,newValue,event,e,f,g,h)=>{
+            if(typeof event === "undefined"){
+                event = newValue;
+            }
+            parse_event(event);
+        } );
+    }
+
+
+
+
+
+    //Mining funcs
+    function generationOf(_tokenId){
+        //Get generation of given token
+        return Math.floor(Math.log2(_tokenId));
+    }
+    const calculate_cost = (_tokenId) => {
+        //You need this so your tx sends the right amount of ETH
+        const generation = generationOf(_tokenId);
+        return (BN.from(Math.pow(2,generation) - 1)).mul(BASE_COST);
+    }
+    function Hash(address,prev,nonce){
+        //Just a wrapped hash
+        return ethers.utils.solidityKeccak256(["address","bytes32","uint256"],[address,prev,nonce]);
+    }
+    function getDifficulty(tokenId){
+        const generation = generationOf(tokenId);
+        let difficulty =  BASE_DIFFICULTY.div(BN.from(Math.pow(DIFFICULTY_RAMP,generation)));
+        if(generation > 13){
+            difficulty.div(
+                BN.from(parseInt(tokenId) - Math.pow(2,14) + 1)
+            );
+        }
+        return difficulty;
+    }
+
+
+    function Attempt(address,prev_hash,nonce,difficulty){
+        //The main mining check
+        //returns true if current nonce returns hash below current difficulty
+        //address = miner's address
+
+        const _hash = Hash(address,prev_hash,nonce);
+        const hash = BN.from(_hash);
+
+        return hash.lt(difficulty);
+    }
+
+
+    //This is how many hash attempts to do in one for loop.
+    //  Setting it higher might lag the browser a little
+    //    The site miner automatically adjusts it for
+    //      smooth sailing.
+    let attempts_per_tick = 2000;
+
+
+
+    //This is the mining loop. It will run forever until it finds a successful nonce,
+    //  or if its turned off
+    function mine(){
+        let t0 = new Date();
+        for(let i = 0; i < attempts_per_tick; i++){
+            nonce++;
+            if(Attempt(connected_address,prev_hash,nonce,difficulty)){
+                found = true;
+                break;
+            }
+        }
+        let t1 = new Date();
+
+        SetText("readout", Math.round(attempts_per_tick / ((t1 - t0)/1000))+"H/sec | nonce:"+nonce);
+
+
+        if(found){
+            //You probs wanna add the found alarm here if you have one.
+            //Also you could trigger request_mint_transaction()
+
+
+            Show("button-mint",true);
+            Show("button-stop",false);
+        }else if(mining){
+            if(background_mining){
+                setTimeout(mine,1);
+            }else{
+                requestAnimationFrame(mine);
+            }
+        }
+
+    }
+
+
+
+
+    async function request_mint_transaction(){
+        //This triggers the metamask tx window to mint an atom
+        try{
+            const cost = calculate_cost(next_id).toString();
+            const overrides = {value: cost};
+            const tx =  await contractWithSigner.mine(nonce,overrides);
+
+        }catch(e){
+            console.log(e);
+        }
+
+    }
+
+
+
+
+    //Assign button controls
+    OnClick("button-mine", ()=>{
+        mining = true;
+        Show("button-stop",true);
+        Show("button-mine",false);
+
+        mine();
+    });
+    OnClick("button-stop", ()=>{
+        mining = false;
+        Show("button-stop",false);
+        Show("button-mine",true);
+    });
+    OnClick("button-mint",()=>{
+        request_mint_transaction();
+    });
+
+
+
+</script>
+
+<body>
+
+<button id="button-mine">
+    Mine
+</button>
+<button id="button-stop">
+    Stop
+</button>
+<div id="readout">
+
+</div>
+<button id="button-mint">
+    MINT
+</button>
+
+
+</body>
+</html>

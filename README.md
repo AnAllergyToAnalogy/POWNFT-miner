@@ -8,8 +8,10 @@ Note: MetaMask doesn't like playing with non-https sites, so you'll probs wanna 
 
 # The yawnson miner
 
-A POW NFT community member going only by the name *yawnson* has shared their miner code. It's not a fork of this code, but is far more efficient.
+A POW NFT community member going only by the name *yawnson* has shared their miner code. It's not a fork of my code, but is far more efficient.
 
-You may see their repo here:
+If you're going to use it, I suggest you vet the code yourself first for security reasons, but this outperforms my code by orders of magnitude. I've implemented some of their changes in the site miner, and will be adding more of them down the track.
+
+You can see their repo here:
 
 [https://github.com/yawnson/pownft-miner](https://github.com/yawnson/pownft-miner)
